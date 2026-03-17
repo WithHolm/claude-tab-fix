@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+var version = "dev"
+
 type hookInput struct {
 	ToolName  string    `json:"tool_name"`
 	ToolInput editInput `json:"tool_input"`
@@ -154,6 +156,11 @@ func passThrough() {
 }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println(version)
+		return
+	}
+
 	var input hookInput
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
 		passThrough()

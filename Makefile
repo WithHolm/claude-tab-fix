@@ -1,5 +1,5 @@
 build:
-	go build -o claude-tab-fix .
+	go build -ldflags "-X main.version=$(shell git describe --tags --always)" -o claude-tab-fix .
 
 fmt:
 	gofmt -w .
