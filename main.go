@@ -5,10 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 )
 
-var version = "dev"
+var version = func() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}()
 
 type hookInput struct {
 	ToolName  string    `json:"tool_name"`
