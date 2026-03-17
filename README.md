@@ -8,11 +8,18 @@ Claude Code's `Edit` tool matches `old_string` against file content as a literal
 
 ## Installation
 
+### prebuilt
+
+go to the right side of this website and look for releases for a bin/exe download. download that
+
+
+## via go
+
 ```sh
 go install github.com/WithHolm/claude-tab-fix@latest
 ```
 
-Or build from source:
+### build from source
 
 ```sh
 git clone https://github.com/WithHolm/claude-tab-fix
@@ -22,7 +29,26 @@ make install
 
 ## Setup
 
-Register the hook in your Claude Code settings. You can do this globally (`~/.claude/settings.json`) or per-project (`.claude/settings.json`):
+### As a plugin (recommended)
+
+Install the binary first, then install the plugin so Claude Code picks up the hook automatically:
+
+```sh
+# 1. Install the binary
+go install github.com/WithHolm/claude-tab-fix@latest
+
+# 2. Install the plugin
+/plugin marketplace add WithHolm/claude-tab-fix
+/plugin install claude-tab-fix@WithHolm/claude-tab-fix
+```
+
+The plugin registers the `PreToolUse` hook for you — no manual config editing needed.
+
+### Manually
+
+Install the binary, then add the hook to your Claude Code settings.
+
+**Per-project** — commit `.claude/settings.json` to your repo so anyone who clones it gets the hook automatically:
 
 ```json
 {
@@ -42,7 +68,9 @@ Register the hook in your Claude Code settings. You can do this globally (`~/.cl
 }
 ```
 
-If the binary is not on your `PATH`, use the full path returned by `which claude-tab-fix` or `go env GOPATH`/bin/claude-tab-fix`.
+**Globally** — add the same block to `~/.claude/settings.json` to enable it for every project on your machine.
+
+If the binary is not on your `PATH`, use the full path: `$(go env GOPATH)/bin/claude-tab-fix`.
 
 ## How it works
 
