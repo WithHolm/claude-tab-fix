@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -131,6 +132,17 @@ func reindent(s string, from, to indentStyle) string {
 	return sb.String()
 }
 
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "[indent-normalize] "+format+"\n", args...)
+}
+
+func indentName(s indentStyle) string {
+	if s.char == '\t' {
+		return "tabs"
+	}
+	return fmt.Sprintf("%d-space", s.width)
+}
+
 func passThrough() {
 	out := hookOutput{
 		HookSpecificOutput: hookSpecific{
@@ -154,7 +166,8 @@ func main() {
 		return
 	}
 
-	fileIndent := detectIndent(string(content))
+	fileStr := string(content)
+	fileIndent := detectIndent(fileStr)
 	oldIndent := detectIndent(input.ToolInput.OldString)
 
 	// If either detection failed or they match, pass through
@@ -165,6 +178,14 @@ func main() {
 
 	newOld := reindent(input.ToolInput.OldString, oldIndent, fileIndent)
 	newNew := reindent(input.ToolInput.NewString, oldIndent, fileIndent)
+
+	oldLines := len(strings.Split(input.ToolInput.OldString, "\n"))
+	logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
+
+	if !strings.Contains(fileStr, newOld) {
+		logf("WARNING: normalized old_string not found in file — edit will likely fail")
+		logf("normalized old_string was:\n%s", newOld)
+	}
 
 	updated := input.ToolInput
 	updated.OldString = newOld
