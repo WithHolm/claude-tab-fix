@@ -140,6 +140,75 @@ func reindent(s string, from, to indentStyle) string {
 	return sb.String()
 }
 
+// lineSimilarity returns a 0.0–1.0 score comparing two lines after stripping
+// leading/trailing whitespace. Uses longest-common-subsequence character ratio.
+func lineSimilarity(a, b string) float64 {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == b {
+		return 1.0
+	}
+	if len(a) == 0 && len(b) == 0 {
+		return 1.0
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+	// LCS length via DP
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	curr := make([]int, len(rb)+1)
+	for i := 1; i <= len(ra); i++ {
+		for j := 1; j <= len(rb); j++ {
+			if ra[i-1] == rb[j-1] {
+				curr[j] = prev[j-1] + 1
+			} else if prev[j] > curr[j-1] {
+				curr[j] = prev[j]
+			} else {
+				curr[j] = curr[j-1]
+			}
+		}
+		prev, curr = curr, prev
+		for k := range curr {
+			curr[k] = 0
+		}
+	}
+	lcs := prev[len(rb)]
+	maxLen := len(ra)
+	if len(rb) > maxLen {
+		maxLen = len(rb)
+	}
+	return float64(lcs) / float64(maxLen)
+}
+
+// fuzzyFindBlock slides a window of len(query) lines over fileLines and returns
+// the start index and score of the best-matching window.
+func fuzzyFindBlock(fileLines, query []string) (bestStart int, bestScore float64) {
+	n := len(query)
+	if n == 0 || len(fileLines) < n {
+		return -1, 0
+	}
+	bestStart = -1
+	for i := 0; i <= len(fileLines)-n; i++ {
+		matched := 0
+		total := 0.0
+		for j, ql := range query {
+			s := lineSimilarity(fileLines[i+j], ql)
+			total += s
+			if s >= 0.85 {
+				matched++
+			}
+		}
+		score := total / float64(n)
+		// require 85% of lines to individually match
+		if float64(matched)/float64(n) >= 0.85 && score > bestScore {
+			bestScore = score
+			bestStart = i
+		}
+	}
+	return bestStart, bestScore
+}
+
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[indent-normalize] "+format+"\n", args...)
 }
@@ -196,8 +265,18 @@ func main() {
 	logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
 
 	if !strings.Contains(fileStr, newOld) {
-		logf("WARNING: normalized old_string not found in file — edit will likely fail")
-		logf("normalized old_string was:\n%s", newOld)
+		// Exact match failed — try fuzzy block match
+		fileLines := strings.Split(fileStr, "\n")
+		queryLines := strings.Split(newOld, "\n")
+		start, score := fuzzyFindBlock(fileLines, queryLines)
+		if start >= 0 {
+			matched := strings.Join(fileLines[start:start+len(queryLines)], "\n")
+			newOld = matched
+			logf("fuzzy match: replaced old_string with exact file bytes (score=%.2f, lines %d–%d)", score, start+1, start+len(queryLines))
+		} else {
+			logf("WARNING: normalized old_string not found in file and fuzzy match failed — edit will likely fail")
+			logf("normalized old_string was:\n%s", newOld)
+		}
 	}
 
 	updated := input.ToolInput

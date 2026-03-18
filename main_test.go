@@ -95,6 +95,119 @@ func TestReindent_PreservesUnindentedLines(t *testing.T) {
 	}
 }
 
+// --- lineSimilarity ---
+
+func TestLineSimilarity_Identical(t *testing.T) {
+	if s := lineSimilarity("foo bar", "foo bar"); s != 1.0 {
+		t.Fatalf("expected 1.0, got %f", s)
+	}
+}
+
+func TestLineSimilarity_Empty(t *testing.T) {
+	if s := lineSimilarity("", ""); s != 1.0 {
+		t.Fatalf("expected 1.0, got %f", s)
+	}
+}
+
+func TestLineSimilarity_OneEmpty(t *testing.T) {
+	if s := lineSimilarity("foo", ""); s != 0.0 {
+		t.Fatalf("expected 0.0, got %f", s)
+	}
+}
+
+func TestLineSimilarity_HighSimilarity(t *testing.T) {
+	// one character differs — should be well above 0.85
+	s := lineSimilarity(`\tif x == 'foo' {`, `\tif x == "foo" {`)
+	if s < 0.85 {
+		t.Fatalf("expected high similarity, got %f", s)
+	}
+}
+
+func TestLineSimilarity_StripsIndent(t *testing.T) {
+	// leading whitespace should not affect score
+	s := lineSimilarity("    foo()", "\tfoo()")
+	if s != 1.0 {
+		t.Fatalf("expected 1.0 after stripping indent, got %f", s)
+	}
+}
+
+// --- fuzzyFindBlock ---
+
+func TestFuzzyFindBlock_ExactMatch(t *testing.T) {
+	file := strings.Split("a\nb\nc\nd\ne", "\n")
+	query := strings.Split("b\nc\nd", "\n")
+	start, score := fuzzyFindBlock(file, query)
+	if start != 1 {
+		t.Fatalf("expected start=1, got %d", start)
+	}
+	if score < 0.99 {
+		t.Fatalf("expected near-perfect score, got %f", score)
+	}
+}
+
+func TestFuzzyFindBlock_SlightDrift(t *testing.T) {
+	// query has a single-quote where file has double-quote, but lines are long enough to score well
+	file := strings.Split(
+		"func foo() {\n\tif someCondition && x == \"expected-value-here\" {\n\t\treturn true\n\t}\n}",
+		"\n",
+	)
+	query := strings.Split(
+		"func foo() {\n\tif someCondition && x == 'expected-value-here' {\n\t\treturn true\n\t}\n}",
+		"\n",
+	)
+	start, score := fuzzyFindBlock(file, query)
+	if start != 0 {
+		t.Fatalf("expected start=0, got %d (score=%f)", start, score)
+	}
+	if score < 0.85 {
+		t.Fatalf("expected score >= 0.85, got %f", score)
+	}
+}
+
+func TestFuzzyFindBlock_NoMatch(t *testing.T) {
+	file := strings.Split("a\nb\nc", "\n")
+	query := strings.Split("x\ny\nz", "\n")
+	start, score := fuzzyFindBlock(file, query)
+	if start >= 0 {
+		t.Fatalf("expected no match, got start=%d score=%f", start, score)
+	}
+}
+
+func TestFuzzyFindBlock_QueryLongerThanFile(t *testing.T) {
+	file := strings.Split("a\nb", "\n")
+	query := strings.Split("a\nb\nc\nd", "\n")
+	start, _ := fuzzyFindBlock(file, query)
+	if start >= 0 {
+		t.Fatalf("expected no match when query longer than file")
+	}
+}
+
+// --- integration: fuzzy fallback ---
+
+func TestIntegration_FuzzyFallback(t *testing.T) {
+	// File uses tabs; old_string uses spaces AND has a quote drift
+	fileContent := "package main\n\nfunc foo() {\n\tif x == \"hello\" {\n\t\treturn true\n\t}\n}\n"
+	path := writeTemp(t, fileContent)
+
+	out := runHook(t, hookInput{
+		ToolName: "Edit",
+		ToolInput: editInput{
+			FilePath:  path,
+			OldString: "    if x == 'hello' {\n        return true\n    }",
+			NewString: "    if x == 'world' {\n        return false\n    }",
+		},
+	})
+
+	if out.HookSpecificOutput.UpdatedInput == nil {
+		t.Fatal("expected updatedInput from fuzzy fallback, got nil")
+	}
+	// old_string should be exact file bytes
+	want := "\tif x == \"hello\" {\n\t\treturn true\n\t}"
+	if out.HookSpecificOutput.UpdatedInput.OldString != want {
+		t.Fatalf("expected exact file bytes:\n%q\ngot:\n%q", want, out.HookSpecificOutput.UpdatedInput.OldString)
+	}
+}
+
 // --- integration via main() stdin/stdout ---
 
 func runHook(t *testing.T, input hookInput) hookOutput {
