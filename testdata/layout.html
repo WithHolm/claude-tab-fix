@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>My App</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <nav class="nav" role="navigation" aria-label="Main navigation">
+        <a class="nav__logo" href="/">
+          <img src="/static/logo.svg" alt="My App" width="120" height="40" />
+        </a>
+        <ul class="nav__list">
+          <li class="nav__item">
+            <a class="nav__link" href="/features">Features</a>
+          </li>
+          <li class="nav__item">
+            <a class="nav__link" href="/pricing">Pricing</a>
+          </li>
+          <li class="nav__item nav__item--cta">
+            <a class="nav__link nav__link--button" href="/signup">Get started</a>
+          </li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero">
+        <div class="hero__inner">
+          <h1 class="hero__title">Build faster with <span class="hero__accent">My App</span></h1>
+          <p class="hero__subtitle">
+            The all-in-one platform for teams who ship. Integrate your tools,
+            automate your workflows, and focus on what matters.
+          </p>
+          <div class="hero__actions">
+            <a href="/signup" class="btn btn--primary btn--large">Start for free</a>
+            <a href="/demo" class="btn btn--ghost btn--large">Watch demo</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="features" aria-labelledby="features-heading">
+        <h2 id="features-heading" class="features__heading">Everything you need</h2>
+        <ul class="features__grid">
+          <li class="feature-card">
+            <div class="feature-card__icon" aria-hidden="true">⚡</div>
+            <h3 class="feature-card__title">Fast by default</h3>
+            <p class="feature-card__body">
+              Zero-config performance optimisations baked in from day one.
+            </p>
+          </li>
+          <li class="feature-card">
+            <div class="feature-card__icon" aria-hidden="true">🔒</div>
+            <h3 class="feature-card__title">Secure by design</h3>
+            <p class="feature-card__body">
+              End-to-end encryption, SOC 2 Type II certified, GDPR ready.
+            </p>
+          </li>
+          <li class="feature-card">
+            <div class="feature-card__icon" aria-hidden="true">🔌</div>
+            <h3 class="feature-card__title">Integrates with everything</h3>
+            <p class="feature-card__body">
+              Native connectors for GitHub, Slack, Jira, and 200+ more tools.
+            </p>
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="site-footer__inner">
+        <p class="site-footer__copy">&copy; 2025 My App, Inc. All rights reserved.</p>
+        <ul class="site-footer__links">
+          <li><a href="/privacy">Privacy</a></li>
+          <li><a href="/terms">Terms</a></li>
+          <li><a href="/contact">Contact</a></li>
+        </ul>
+      </div>
+    </footer>
+
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

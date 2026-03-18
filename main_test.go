@@ -347,3 +347,204 @@ func TestIntegration_NoIndentInOldString(t *testing.T) {
 		t.Fatalf("expected pass-through when old_string has no indented lines")
 	}
 }
+
+// --- golden file tests ---
+
+// goldenCase describes one hook invocation against a testdata file.
+// wantNormalized=true means the file uses different indent than oldString,
+// so the hook must produce updatedInput with an old_string found in the file.
+// wantNormalized=false means indents already match — hook passes through but
+// old_string must still be found in the file verbatim.
+type goldenCase struct {
+	name            string
+	file            string // relative to testdata/
+	oldString       string
+	newString       string
+	wantNormalized  bool // expect hook to produce updatedInput
+}
+
+func TestGolden(t *testing.T) {
+	cases := []goldenCase{
+		// Tab-indented files: hook normalizes space old_string → tabs
+		{
+			name: "go/deep_nested exact match",
+			file: "deep_nested.go",
+			oldString: "        if label, ok := cfg.Labels[item]; ok {\n" +
+				"                if label == \"skip\" {\n" +
+				"                        continue\n" +
+				"                } else if label == \"stop\" {\n" +
+				"                        return fmt.Errorf(\"stopped at item %q\", item)\n" +
+				"                } else {\n" +
+				"                        fmt.Printf(\"processing %q with label %q\\n\", item, label)\n" +
+				"                }\n" +
+				"        }",
+			newString: "        if label, ok := cfg.Labels[item]; ok {\n" +
+				"                fmt.Printf(\"processing %q with label %q\\n\", item, label)\n" +
+				"        }",
+			wantNormalized: true,
+		},
+		{
+			name: "go/deep_nested validate block",
+			file: "deep_nested.go",
+			oldString: "        for k, v := range cfg.Labels {\n" +
+				"                if k == \"\" {\n" +
+				"                        errs = append(errs, \"label key must not be empty\")\n" +
+				"                }\n" +
+				"                if v == \"\" {\n" +
+				"                        errs = append(errs, fmt.Sprintf(\"label %q has empty value\", k))\n" +
+				"                }\n" +
+				"        }",
+			newString: "        for k, v := range cfg.Labels {\n" +
+				"                if k == \"\" || v == \"\" {\n" +
+				"                        errs = append(errs, fmt.Sprintf(\"invalid label %q=%q\", k, v))\n" +
+				"                }\n" +
+				"        }",
+			wantNormalized: true,
+		},
+		{
+			name: "templ/navbar fuzzy quote drift",
+			file: "component.templ",
+			oldString: "                <a\n" +
+				"                        href={ templ.URL(\"/\" + item) }\n" +
+				"                        class=\"navbar-link\"\n" +
+				"                        @click.stop={ \"navigate('\" + item + \"')\" }\n" +
+				"                >\n" +
+				"                        { item }\n" +
+				"                </a>",
+			newString: "                <a\n" +
+				"                        href={ templ.URL(\"/\" + item) }\n" +
+				"                        class=\"navbar-link\"\n" +
+				"                        @click.stop={ \"navigate('\" + item + \"')\" }\n" +
+				"                        data-item={ item }\n" +
+				"                >\n" +
+				"                        { item }\n" +
+				"                </a>",
+			wantNormalized: true,
+		},
+		{
+			name: "templ/modal close button",
+			file: "component.templ",
+			oldString: "                        <button class=\"modal-close\" @click=\"closeModal\" aria-label=\"Close\">\n" +
+				"                                <span aria-hidden=\"true\">&times;</span>\n" +
+				"                        </button>",
+			newString: "                        <button class=\"modal-close\" @click=\"closeModal\" aria-label=\"Close\" type=\"button\">\n" +
+				"                                <span aria-hidden=\"true\">&times;</span>\n" +
+				"                        </button>",
+			wantNormalized: true,
+		},
+		// Space-indented files: hook passes through, but old_string must exist verbatim
+		{
+			name: "typescript/fetchUser error branch",
+			file: "service.ts",
+			oldString: "        const response = await fetch(`/api/users/${id}`);\n" +
+				"        if (!response.ok) {\n" +
+				"            return {\n" +
+				"                data: null as unknown as User,\n" +
+				"                error: `HTTP ${response.status}`,\n" +
+				"                status: response.status,\n" +
+				"            };\n" +
+				"        }",
+			newString: "        const response = await fetch(`/api/users/${id}`, { signal: AbortSignal.timeout(5000) });\n" +
+				"        if (!response.ok) {\n" +
+				"            return {\n" +
+				"                data: null as unknown as User,\n" +
+				"                error: `HTTP ${response.status}: ${await response.text()}`,\n" +
+				"                status: response.status,\n" +
+				"            };\n" +
+				"        }",
+			wantNormalized: false,
+		},
+		{
+			name: "python/pipeline run loop",
+			file: "pipeline.py",
+			oldString: "        for item in data:\n" +
+				"            try:\n" +
+				"                out = self._process(item)\n" +
+				"                if out is not None:\n" +
+				"                    results.append(out)\n" +
+				"            except Exception as exc:\n" +
+				"                if self.config.get(\"fail_fast\", False):\n" +
+				"                    raise PipelineError(f\"stage {self.name!r} failed on item {item!r}\") from exc\n" +
+				"                logger.warning(\"stage %r: skipping item due to error: %s\", self.name, exc)",
+			newString: "        for item in data:\n" +
+				"            try:\n" +
+				"                out = self._process(item)\n" +
+				"                if out is not None:\n" +
+				"                    results.append(out)\n" +
+				"            except Exception as exc:\n" +
+				"                logger.warning(\"stage %r: error: %s\", self.name, exc)\n" +
+				"                if self.config.get(\"fail_fast\", False):\n" +
+				"                    raise PipelineError(f\"stage {self.name!r} failed\") from exc",
+			wantNormalized: false,
+		},
+		{
+			name: "html/hero section",
+			file: "layout.html",
+			oldString: "          <h1 class=\"hero__title\">Build faster with <span class=\"hero__accent\">My App</span></h1>\n" +
+				"          <p class=\"hero__subtitle\">\n" +
+				"            The all-in-one platform for teams who ship. Integrate your tools,\n" +
+				"            automate your workflows, and focus on what matters.\n" +
+				"          </p>",
+			newString: "          <h1 class=\"hero__title\">Ship faster with <span class=\"hero__accent\">My App</span></h1>\n" +
+				"          <p class=\"hero__subtitle\">\n" +
+				"            The all-in-one platform for teams who ship.\n" +
+				"          </p>",
+			wantNormalized: false,
+		},
+		{
+			name: "yaml/deploy job",
+			file: "ci.yaml",
+			oldString: "      - name: Deploy to staging\n" +
+				"        env:\n" +
+				"          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n" +
+				"          DEPLOY_HOST: ${{ secrets.STAGING_HOST }}\n" +
+				"        run: |\n" +
+				"          echo \"Deploying to staging...\"\n" +
+				"          ./scripts/deploy.sh staging dist/app-linux-amd64",
+			newString: "      - name: Deploy to staging\n" +
+				"        env:\n" +
+				"          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n" +
+				"          DEPLOY_HOST: ${{ secrets.STAGING_HOST }}\n" +
+				"        run: |\n" +
+				"          echo \"Deploying to staging...\"\n" +
+				"          ./scripts/deploy.sh staging dist/app-linux-amd64\n" +
+				"          ./scripts/smoke-test.sh https://staging.example.com",
+			wantNormalized: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join("testdata", tc.file)
+			out := runHook(t, hookInput{
+				ToolName: "Edit",
+				ToolInput: editInput{
+					FilePath:  path,
+					OldString: tc.oldString,
+					NewString: tc.newString,
+				},
+			})
+
+			fileBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("could not read testdata file: %v", err)
+			}
+			fileStr := string(fileBytes)
+
+			if tc.wantNormalized {
+				if out.HookSpecificOutput.UpdatedInput == nil {
+					t.Fatal("expected updatedInput (normalization or fuzzy), got nil")
+				}
+				got := out.HookSpecificOutput.UpdatedInput.OldString
+				if !strings.Contains(fileStr, got) {
+					t.Fatalf("normalized old_string not found in file\ngot:\n%s", got)
+				}
+			} else {
+				// Space-indented file: hook passes through, old_string must already be in file
+				if !strings.Contains(fileStr, tc.oldString) {
+					t.Fatalf("old_string not found in testdata file — fix the test case\ngot:\n%s", tc.oldString)
+				}
+			}
+		})
+	}
+}

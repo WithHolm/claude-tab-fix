@@ -1,0 +1,69 @@
+package testdata
+
+type ButtonProps struct {
+	Label    string
+	Disabled bool
+	Variant  string
+}
+
+templ Button(props ButtonProps) {
+	<button
+		class={ "btn", templ.KV("btn-disabled", props.Disabled), templ.KV("btn-primary", props.Variant == "primary") }
+		disabled?={ props.Disabled }
+	>
+		{ props.Label }
+	</button>
+}
+
+templ Card(title string, subtitle string) {
+	<div class="card">
+		<div class="card-header">
+			<h2 class="card-title">{ title }</h2>
+			if subtitle != "" {
+				<p class="card-subtitle">{ subtitle }</p>
+			}
+		</div>
+		<div class="card-body">
+			{ children... }
+		</div>
+	</div>
+}
+
+templ NavBar(items []string, active string) {
+	<nav class="navbar">
+		<ul class="navbar-list">
+			for _, item := range items {
+				<li class={ "navbar-item", templ.KV("navbar-item--active", item == active) }>
+					<a
+						href={ templ.URL("/" + item) }
+						class="navbar-link"
+						@click.stop={ "navigate('" + item + "')" }
+					>
+						{ item }
+					</a>
+				</li>
+			}
+		</ul>
+	</nav>
+}
+
+templ Modal(id string, title string, visible bool) {
+	<div
+		id={ id }
+		class={ "modal", templ.KV("modal--visible", visible) }
+		@keydown.escape="closeModal"
+		@click.self="closeModal"
+	>
+		<div class="modal-dialog">
+			<div class="modal-header">
+				<h3 class="modal-title">{ title }</h3>
+				<button class="modal-close" @click="closeModal" aria-label="Close">
+					<span aria-hidden="true">&times;</span>
+				</button>
+			</div>
+			<div class="modal-content">
+				{ children... }
+			</div>
+		</div>
+	</div>
+}
