@@ -17,8 +17,8 @@ var version = func() string {
 }()
 
 type hookInput struct {
-	ToolName  string    `json:"tool_name"`
-	ToolInput editInput `json:"tool_input"`
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
 }
 
 type editInput struct {
@@ -28,14 +28,21 @@ type editInput struct {
 	ReplaceAll bool   `json:"replace_all"`
 }
 
+// bashInput covers the Bash tool (command) and Write tool (file_path + content).
+type bashInput struct {
+	Command  string `json:"command"`
+	FilePath string `json:"file_path"`
+	Content  string `json:"content"`
+}
+
 type hookOutput struct {
 	HookSpecificOutput hookSpecific `json:"hookSpecificOutput"`
 }
 
 type hookSpecific struct {
-	HookEventName      string     `json:"hookEventName"`
-	PermissionDecision string     `json:"permissionDecision"`
-	UpdatedInput       *editInput `json:"updatedInput,omitempty"`
+	HookEventName      string `json:"hookEventName"`
+	PermissionDecision string `json:"permissionDecision"`
+	AdditionalContext  string `json:"additionalContext,omitempty"`
 }
 
 type indentStyle struct {
@@ -230,6 +237,160 @@ func passThrough() {
 	json.NewEncoder(os.Stdout).Encode(out)
 }
 
+func passThroughWithContext(ctx string) {
+	out := hookOutput{
+		HookSpecificOutput: hookSpecific{
+			HookEventName:      "PreToolUse",
+			PermissionDecision: "allow",
+			AdditionalContext:  ctx,
+		},
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
+}
+
+// exitFn is a variable so tests can override os.Exit.
+var exitFn = os.Exit
+
+func blockWithFeedback(msg string) {
+	// Exit 2 causes Claude Code to surface stderr as feedback to Claude,
+	// allowing it to retry the Edit with corrected inputs.
+	fmt.Fprintln(os.Stderr, msg)
+	exitFn(2)
+}
+
+// extractFileFromBashCommand tries to identify the target file in common
+// file-editing shell patterns (sed -i, awk, perl -i, python -c).
+func extractFileFromBashCommand(cmd string) string {
+	editPatterns := []string{"sed ", "awk ", "perl ", "python ", "python3 "}
+	for _, p := range editPatterns {
+		if !strings.Contains(cmd, p) {
+			continue
+		}
+		// Take the last token that looks like a file path (has . or /)
+		fields := strings.Fields(cmd)
+		for i := len(fields) - 1; i >= 0; i-- {
+			f := fields[i]
+			if strings.HasPrefix(f, "-") || strings.HasPrefix(f, "'") || strings.HasPrefix(f, "\"") {
+				continue
+			}
+			if strings.ContainsAny(f, "./") {
+				return f
+			}
+		}
+	}
+	return ""
+}
+
+// handleEdit is the main path: fix indent mismatches in Edit tool calls.
+func handleEdit(raw json.RawMessage) {
+	var ei editInput
+	if err := json.Unmarshal(raw, &ei); err != nil {
+		passThrough()
+		return
+	}
+
+	content, err := os.ReadFile(ei.FilePath)
+	if err != nil || bytes.IndexByte(content, 0) >= 0 {
+		passThrough()
+		return
+	}
+
+	fileStr := string(content)
+	fileIndent := detectIndent(fileStr)
+	oldIndent := detectIndent(ei.OldString)
+
+	// If either detection failed or they match, pass through
+	if fileIndent.char == 0 || oldIndent.char == 0 || fileIndent.char == oldIndent.char {
+		passThrough()
+		return
+	}
+
+	newOld := reindent(ei.OldString, oldIndent, fileIndent)
+	newNew := reindent(ei.NewString, oldIndent, fileIndent)
+
+	oldLines := len(strings.Split(ei.OldString, "\n"))
+	logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
+
+	if !strings.Contains(fileStr, newOld) {
+		// Exact match failed — try fuzzy block match
+		fileLines := strings.Split(fileStr, "\n")
+		queryLines := strings.Split(newOld, "\n")
+		start, score := fuzzyFindBlock(fileLines, queryLines)
+		if start >= 0 {
+			matched := strings.Join(fileLines[start:start+len(queryLines)], "\n")
+			newOld = matched
+			logf("fuzzy match: found block (score=%.2f, lines %d–%d)", score, start+1, start+len(queryLines))
+		} else {
+			logf("WARNING: normalized old_string not found in file and fuzzy match failed — edit will likely fail")
+			logf("normalized old_string was:\n%s", newOld)
+			passThrough()
+			return
+		}
+	}
+
+	// Block the edit and feed corrected strings back to Claude so it retries
+	// with exact file bytes. This is more reliable than updatedInput because
+	// Claude Code may pre-validate old_string before applying hook output.
+	blockWithFeedback(fmt.Sprintf(
+		"old_string indentation mismatch (%s in old_string vs %s in file). "+
+			"Retry the Edit with these exact strings:\n\nold_string:\n%s\n\nnew_string:\n%s",
+		indentName(oldIndent), indentName(fileIndent), newOld, newNew,
+	))
+}
+
+// handleBashOrWrite warns (non-blocking) when Claude tries to edit a
+// tab-indented file via Bash or Write, bypassing indent normalization.
+func handleBashOrWrite(toolName string, raw json.RawMessage) {
+	var bi bashInput
+	if err := json.Unmarshal(raw, &bi); err != nil {
+		passThrough()
+		return
+	}
+
+	var filePath, content string
+	if toolName == "Write" {
+		filePath = bi.FilePath
+		content = bi.Content
+	} else {
+		filePath = extractFileFromBashCommand(bi.Command)
+		if filePath == "" {
+			passThrough()
+			return
+		}
+	}
+
+	existing, err := os.ReadFile(filePath)
+	if err != nil || bytes.IndexByte(existing, 0) >= 0 {
+		passThrough()
+		return
+	}
+
+	fileIndent := detectIndent(string(existing))
+	if fileIndent.char != '\t' {
+		passThrough()
+		return
+	}
+
+	// For Write: also flag if the new content uses spaces
+	var mismatch string
+	if toolName == "Write" && content != "" {
+		newIndent := detectIndent(content)
+		if newIndent.char == ' ' {
+			mismatch = fmt.Sprintf(
+				" New content uses %s but the file uses tabs — result will have mixed indentation.",
+				indentName(newIndent),
+			)
+		}
+	}
+
+	passThroughWithContext(fmt.Sprintf(
+		"WARNING (claude-tab-fix): %q is a tab-indented file. "+
+			"Editing it via %s bypasses indent normalization.%s "+
+			"Strongly prefer the Edit tool for targeted changes to this file.",
+		filePath, toolName, mismatch,
+	))
+}
+
 func main() {
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
 		fmt.Println(version)
@@ -242,53 +403,12 @@ func main() {
 		return
 	}
 
-	content, err := os.ReadFile(input.ToolInput.FilePath)
-	if err != nil || bytes.IndexByte(content, 0) >= 0 {
+	switch input.ToolName {
+	case "Edit":
+		handleEdit(input.ToolInput)
+	case "Bash", "Write":
+		handleBashOrWrite(input.ToolName, input.ToolInput)
+	default:
 		passThrough()
-		return
 	}
-
-	fileStr := string(content)
-	fileIndent := detectIndent(fileStr)
-	oldIndent := detectIndent(input.ToolInput.OldString)
-
-	// If either detection failed or they match, pass through
-	if fileIndent.char == 0 || oldIndent.char == 0 || fileIndent.char == oldIndent.char {
-		passThrough()
-		return
-	}
-
-	newOld := reindent(input.ToolInput.OldString, oldIndent, fileIndent)
-	newNew := reindent(input.ToolInput.NewString, oldIndent, fileIndent)
-
-	oldLines := len(strings.Split(input.ToolInput.OldString, "\n"))
-	logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
-
-	if !strings.Contains(fileStr, newOld) {
-		// Exact match failed — try fuzzy block match
-		fileLines := strings.Split(fileStr, "\n")
-		queryLines := strings.Split(newOld, "\n")
-		start, score := fuzzyFindBlock(fileLines, queryLines)
-		if start >= 0 {
-			matched := strings.Join(fileLines[start:start+len(queryLines)], "\n")
-			newOld = matched
-			logf("fuzzy match: replaced old_string with exact file bytes (score=%.2f, lines %d–%d)", score, start+1, start+len(queryLines))
-		} else {
-			logf("WARNING: normalized old_string not found in file and fuzzy match failed — edit will likely fail")
-			logf("normalized old_string was:\n%s", newOld)
-		}
-	}
-
-	updated := input.ToolInput
-	updated.OldString = newOld
-	updated.NewString = newNew
-
-	out := hookOutput{
-		HookSpecificOutput: hookSpecific{
-			HookEventName:      "PreToolUse",
-			PermissionDecision: "allow",
-			UpdatedInput:       &updated,
-		},
-	}
-	json.NewEncoder(os.Stdout).Encode(out)
 }

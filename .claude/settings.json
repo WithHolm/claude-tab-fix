@@ -9,6 +9,24 @@
             "command": "claude-tab-fix"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-tab-fix"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-tab-fix"
+          }
+        ]
       }
     ]
   }

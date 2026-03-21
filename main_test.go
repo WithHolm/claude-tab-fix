@@ -95,6 +95,21 @@ func TestReindent_PreservesUnindentedLines(t *testing.T) {
 	}
 }
 
+// Deep indentation: 8-space (4 levels of 2-space) → tabs
+func TestReindent_DeepSpacesToTabs(t *testing.T) {
+	// Simulates Claude sending 8-space-indented old_string for a file that uses tabs
+	input := "        if label == \"skip\" {\n" +
+		"                continue\n" +
+		"        }"
+	from := indentStyle{char: ' ', width: 8}
+	to := indentStyle{char: '\t', width: 1}
+	got := reindent(input, from, to)
+	want := "\tif label == \"skip\" {\n\t\tcontinue\n\t}"
+	if got != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 // --- lineSimilarity ---
 
 func TestLineSimilarity_Identical(t *testing.T) {
@@ -182,67 +197,83 @@ func TestFuzzyFindBlock_QueryLongerThanFile(t *testing.T) {
 	}
 }
 
-// --- integration: fuzzy fallback ---
-
-func TestIntegration_FuzzyFallback(t *testing.T) {
-	// File uses tabs; old_string uses spaces AND has a quote drift
-	fileContent := "package main\n\nfunc foo() {\n\tif x == \"hello\" {\n\t\treturn true\n\t}\n}\n"
-	path := writeTemp(t, fileContent)
-
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
-			FilePath:  path,
-			OldString: "    if x == 'hello' {\n        return true\n    }",
-			NewString: "    if x == 'world' {\n        return false\n    }",
-		},
-	})
-
-	if out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatal("expected updatedInput from fuzzy fallback, got nil")
-	}
-	// old_string should be exact file bytes
-	want := "\tif x == \"hello\" {\n\t\treturn true\n\t}"
-	if out.HookSpecificOutput.UpdatedInput.OldString != want {
-		t.Fatalf("expected exact file bytes:\n%q\ngot:\n%q", want, out.HookSpecificOutput.UpdatedInput.OldString)
-	}
+// hookResult captures the outcome of a hook invocation. The hook now uses
+// exit-2 + stderr feedback rather than updatedInput JSON, so callers need
+// both the exit code and the stderr message.
+type hookResult struct {
+	exitCode int
+	stderr   string
+	// stdout JSON, only populated on passThrough (exit 0)
+	out hookOutput
 }
 
-// --- integration via main() stdin/stdout ---
+// makeInput builds a hookInput with the tool_input marshaled as raw JSON.
+func makeInput(t *testing.T, toolName string, toolInput any) hookInput {
+	t.Helper()
+	raw, err := json.Marshal(toolInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hookInput{ToolName: toolName, ToolInput: json.RawMessage(raw)}
+}
 
-func runHook(t *testing.T, input hookInput) hookOutput {
+// runHook drives main() with the given input and captures stdout, stderr, and
+// the exit code without actually terminating the test process.
+func runHook(t *testing.T, input hookInput) hookResult {
 	t.Helper()
 	b, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Override exitFn so blockWithFeedback doesn't kill the test process.
+	var captured int
+	exitFn = func(code int) { captured = code }
+	t.Cleanup(func() { exitFn = os.Exit })
+
 	oldStdin := os.Stdin
 	oldStdout := os.Stdout
+	oldStderr := os.Stderr
 	t.Cleanup(func() {
 		os.Stdin = oldStdin
 		os.Stdout = oldStdout
+		os.Stderr = oldStderr
 	})
 
-	r, w, _ := os.Pipe()
-	os.Stdin = r
-	w.Write(b)
-	w.Close()
+	// Pipe stdin
+	stdinR, stdinW, _ := os.Pipe()
+	os.Stdin = stdinR
+	stdinW.Write(b)
+	stdinW.Close()
 
-	outR, outW, _ := os.Pipe()
-	os.Stdout = outW
+	// Pipe stdout
+	stdoutR, stdoutW, _ := os.Pipe()
+	os.Stdout = stdoutW
+
+	// Pipe stderr
+	stderrR, stderrW, _ := os.Pipe()
+	os.Stderr = stderrW
 
 	main()
 
-	outW.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(outR)
+	stdoutW.Close()
+	stderrW.Close()
 
-	var out hookOutput
-	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
-		t.Fatalf("failed to parse output: %v\nraw: %s", err, buf.String())
+	var stdoutBuf, stderrBuf bytes.Buffer
+	stdoutBuf.ReadFrom(stdoutR)
+	stderrBuf.ReadFrom(stderrR)
+
+	res := hookResult{
+		exitCode: captured,
+		stderr:   stderrBuf.String(),
 	}
-	return out
+
+	if captured == 0 && stdoutBuf.Len() > 0 {
+		if err := json.Unmarshal(stdoutBuf.Bytes(), &res.out); err != nil {
+			t.Fatalf("failed to parse stdout JSON: %v\nraw: %s", err, stdoutBuf.String())
+		}
+	}
+	return res
 }
 
 func writeTemp(t *testing.T, content string) string {
@@ -256,61 +287,145 @@ func writeTemp(t *testing.T, content string) string {
 	return f.Name()
 }
 
+// extractFeedbackOldString parses the corrected old_string out of the stderr
+// feedback message produced by blockWithFeedback.
+func extractFeedbackOldString(t *testing.T, stderr string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(stderr, "old_string:\n")
+	if !ok {
+		t.Fatalf("stderr feedback missing 'old_string:' marker\n%s", stderr)
+	}
+	corrected, _, ok := strings.Cut(after, "\n\nnew_string:")
+	if !ok {
+		t.Fatalf("stderr feedback missing 'new_string:' section\n%s", stderr)
+	}
+	return corrected
+}
+
+// assertBlocked verifies the hook exited with code 2 and that the feedback
+// message contains the expected corrected old_string.
+func assertBlocked(t *testing.T, res hookResult, wantOldString string) {
+	t.Helper()
+	if res.exitCode != 2 {
+		t.Fatalf("expected exit 2 (block), got exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, wantOldString) {
+		t.Fatalf("stderr feedback missing expected old_string\nwant old_string:\n%s\n\nstderr:\n%s", wantOldString, res.stderr)
+	}
+}
+
+// assertPassThrough verifies the hook allowed the edit through (exit 0, allow decision).
+func assertPassThrough(t *testing.T, res hookResult) {
+	t.Helper()
+	if res.exitCode != 0 {
+		t.Fatalf("expected exit 0 (pass-through), got exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if res.out.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Fatalf("expected allow decision, got %q", res.out.HookSpecificOutput.PermissionDecision)
+	}
+}
+
+// --- integration tests ---
+
 func TestIntegration_SpaceToTab(t *testing.T) {
 	path := writeTemp(t, "package main\n\nfunc foo() {\n\tif true {\n\t\tx := 1\n\t}\n}\n")
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
-			FilePath:  path,
-			OldString: "    if true {\n        x := 1\n    }",
-			NewString: "    if false {\n        x := 2\n    }",
-		},
-	})
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath:  path,
+		OldString: "    if true {\n        x := 1\n    }",
+		NewString: "    if false {\n        x := 2\n    }",
+	}))
+	assertBlocked(t, res, "\tif true {\n\t\tx := 1\n\t}")
+}
 
-	if out.HookSpecificOutput.UpdatedInput == nil {
-		t.Fatal("expected updatedInput, got nil")
+func TestIntegration_FuzzyFallback(t *testing.T) {
+	// File uses tabs; old_string uses spaces AND has a quote drift
+	fileContent := "package main\n\nfunc foo() {\n\tif x == \"hello\" {\n\t\treturn true\n\t}\n}\n"
+	path := writeTemp(t, fileContent)
+
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath:  path,
+		OldString: "    if x == 'hello' {\n        return true\n    }",
+		NewString: "    if x == 'world' {\n        return false\n    }",
+	}))
+
+	// Fuzzy match succeeds — hook blocks with corrected exact file bytes
+	wantOld := "\tif x == \"hello\" {\n\t\treturn true\n\t}"
+	assertBlocked(t, res, wantOld)
+}
+
+// Deep indentation: Claude sends 8-space old_string for a tab-indented file.
+// This is the scenario that was broken on larger documents.
+func TestIntegration_DeepIndentSpaceToTab(t *testing.T) {
+	fileContent := "package main\n\nfunc outer() {\n\tfor _, x := range items {\n\t\tif x != nil {\n\t\t\tif x.Valid() {\n\t\t\t\tprocess(x)\n\t\t\t}\n\t\t}\n\t}\n}\n"
+	path := writeTemp(t, fileContent)
+
+	// Claude sends 8-space (doubling each level) — a common failure mode on
+	// deeply indented blocks when the model loses track of the real indent width.
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath:  path,
+		OldString: "                if x.Valid() {\n                        process(x)\n                }",
+		NewString: "                if x.Valid() {\n                        process(x)\n                        log(x)\n                }",
+	}))
+
+	assertBlocked(t, res, "\t\t\tif x.Valid() {\n\t\t\t\tprocess(x)\n\t\t\t}")
+}
+
+// Simulate the common "bigger document, deep indent" failure: a long file where
+// Claude picks up an 8-space indent from the visual context even though the
+// file uses tabs.
+func TestIntegration_LargeFileDeepNesting(t *testing.T) {
+	path := "testdata/deep_nested.go"
+
+	// Claude sends old_string as if indented with 8 spaces per level (a common
+	// failure on large files where the model infers indent from rendered context).
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath: path,
+		OldString: "                if label == \"skip\" {\n" +
+			"                        continue\n" +
+			"                } else if label == \"stop\" {\n" +
+			"                        return fmt.Errorf(\"stopped at item %q\", item)\n" +
+			"                } else {\n" +
+			"                        fmt.Printf(\"processing %q with label %q\\n\", item, label)\n" +
+			"                }",
+		NewString: "                if label == \"skip\" {\n" +
+			"                        continue\n" +
+			"                } else {\n" +
+			"                        fmt.Printf(\"processing %q with label %q\\n\", item, label)\n" +
+			"                }",
+	}))
+
+	// Hook must block and provide corrected tab-indented strings
+	if res.exitCode != 2 {
+		t.Fatalf("expected exit 2 (block with feedback), got exit %d\nstderr:\n%s", res.exitCode, res.stderr)
 	}
-	if !strings.Contains(out.HookSpecificOutput.UpdatedInput.OldString, "\t") {
-		t.Fatalf("old_string not converted to tabs: %q", out.HookSpecificOutput.UpdatedInput.OldString)
-	}
-	if strings.Contains(out.HookSpecificOutput.UpdatedInput.OldString, "    ") {
-		t.Fatalf("old_string still has spaces: %q", out.HookSpecificOutput.UpdatedInput.OldString)
+	// The corrected old_string must be findable in the actual file
+	fileBytes, _ := os.ReadFile(path)
+	fileStr := string(fileBytes)
+
+	correctedOld := extractFeedbackOldString(t, res.stderr)
+	if !strings.Contains(fileStr, correctedOld) {
+		t.Fatalf("corrected old_string from feedback not found in file\ngot:\n%s", correctedOld)
 	}
 }
 
 func TestIntegration_AlreadyMatchingIndent(t *testing.T) {
 	path := writeTemp(t, "package main\n\nfunc foo() {\n\tif true {\n\t\tx := 1\n\t}\n}\n")
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
-			FilePath:  path,
-			OldString: "\tif true {\n\t\tx := 1\n\t}",
-			NewString: "\tif false {\n\t\tx := 2\n\t}",
-		},
-	})
-
-	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("expected no updatedInput, got %+v", out.HookSpecificOutput.UpdatedInput)
-	}
-	if out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("expected allow, got %q", out.HookSpecificOutput.PermissionDecision)
-	}
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath:  path,
+		OldString: "\tif true {\n\t\tx := 1\n\t}",
+		NewString: "\tif false {\n\t\tx := 2\n\t}",
+	}))
+	assertPassThrough(t, res)
 }
 
 func TestIntegration_NonExistentFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nonexistent.go")
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
+	res := runHook(t, makeInput(t, "Edit", editInput{
 			FilePath:  path,
 			OldString: "    x := 1",
 			NewString: "    x := 2",
-		},
-	})
-
-	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("expected pass-through for missing file, got updatedInput")
-	}
+		}))
+	assertPassThrough(t, res)
 }
 
 func TestIntegration_BinaryFile(t *testing.T) {
@@ -318,54 +433,110 @@ func TestIntegration_BinaryFile(t *testing.T) {
 	path := filepath.Join(dir, "binary.bin")
 	os.WriteFile(path, []byte("data\x00more"), 0644)
 
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
+	res := runHook(t, makeInput(t, "Edit", editInput{
 			FilePath:  path,
 			OldString: "    x := 1",
 			NewString: "    x := 2",
-		},
-	})
-
-	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("expected pass-through for binary file, got updatedInput")
-	}
+		}))
+	assertPassThrough(t, res)
 }
 
 func TestIntegration_NoIndentInOldString(t *testing.T) {
 	path := writeTemp(t, "package main\n\nfunc foo() {\n\tx := 1\n}\n")
-	out := runHook(t, hookInput{
-		ToolName: "Edit",
-		ToolInput: editInput{
+	res := runHook(t, makeInput(t, "Edit", editInput{
 			FilePath:  path,
 			OldString: "package main",
 			NewString: "package main",
-		},
-	})
+		}))
+	assertPassThrough(t, res)
+}
 
-	if out.HookSpecificOutput.UpdatedInput != nil {
-		t.Fatalf("expected pass-through when old_string has no indented lines")
+// --- Bash / Write advisory warning tests ---
+
+func TestBash_WarnOnTabFile(t *testing.T) {
+	path := writeTemp(t, "package main\n\nfunc foo() {\n\tx := 1\n}\n")
+	res := runHook(t, makeInput(t, "Bash", bashInput{
+		Command: "sed -i 's/foo/bar/' " + path,
+	}))
+	// Must pass through (not block), but warn via additionalContext
+	assertPassThrough(t, res)
+	if !strings.Contains(res.out.HookSpecificOutput.AdditionalContext, "tab-indented") {
+		t.Fatalf("expected tab-indented warning in additionalContext, got: %q", res.out.HookSpecificOutput.AdditionalContext)
+	}
+	if !strings.Contains(res.out.HookSpecificOutput.AdditionalContext, "Edit tool") {
+		t.Fatalf("expected Edit tool suggestion in additionalContext, got: %q", res.out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestBash_NoWarnOnSpaceFile(t *testing.T) {
+	path := writeTemp(t, "package main\n\nfunc foo() {\n    x := 1\n}\n")
+	res := runHook(t, makeInput(t, "Bash", bashInput{
+		Command: "sed -i 's/foo/bar/' " + path,
+	}))
+	assertPassThrough(t, res)
+	if res.out.HookSpecificOutput.AdditionalContext != "" {
+		t.Fatalf("expected no warning for space-indented file, got: %q", res.out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestBash_NoWarnOnUnrecognisedCommand(t *testing.T) {
+	res := runHook(t, makeInput(t, "Bash", bashInput{
+		Command: "go test ./...",
+	}))
+	assertPassThrough(t, res)
+	if res.out.HookSpecificOutput.AdditionalContext != "" {
+		t.Fatalf("expected no warning for non-file-edit command, got: %q", res.out.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestWrite_WarnOnTabFileWithSpaceContent(t *testing.T) {
+	path := writeTemp(t, "package main\n\nfunc foo() {\n\tx := 1\n}\n")
+	res := runHook(t, makeInput(t, "Write", bashInput{
+		FilePath: path,
+		Content:  "package main\n\nfunc foo() {\n    x := 2\n}\n",
+	}))
+	assertPassThrough(t, res)
+	ctx := res.out.HookSpecificOutput.AdditionalContext
+	if !strings.Contains(ctx, "tab-indented") {
+		t.Fatalf("expected tab-indented warning, got: %q", ctx)
+	}
+	if !strings.Contains(ctx, "mixed indentation") {
+		t.Fatalf("expected mixed indentation warning, got: %q", ctx)
+	}
+}
+
+func TestWrite_WarnOnTabFileWithTabContent(t *testing.T) {
+	// Content also uses tabs — warn about bypassing hook but no mixed-indent note
+	path := writeTemp(t, "package main\n\nfunc foo() {\n\tx := 1\n}\n")
+	res := runHook(t, makeInput(t, "Write", bashInput{
+		FilePath: path,
+		Content:  "package main\n\nfunc foo() {\n\tx := 2\n}\n",
+	}))
+	assertPassThrough(t, res)
+	ctx := res.out.HookSpecificOutput.AdditionalContext
+	if !strings.Contains(ctx, "tab-indented") {
+		t.Fatalf("expected tab-indented warning, got: %q", ctx)
+	}
+	if strings.Contains(ctx, "mixed indentation") {
+		t.Fatalf("unexpected mixed indentation warning when content also uses tabs: %q", ctx)
 	}
 }
 
 // --- golden file tests ---
 
-// goldenCase describes one hook invocation against a testdata file.
-// wantNormalized=true means the file uses different indent than oldString,
-// so the hook must produce updatedInput with an old_string found in the file.
-// wantNormalized=false means indents already match — hook passes through but
-// old_string must still be found in the file verbatim.
 type goldenCase struct {
-	name            string
-	file            string // relative to testdata/
-	oldString       string
-	newString       string
-	wantNormalized  bool // expect hook to produce updatedInput
+	name string
+	file string // relative to testdata/
+	oldString string
+	newString string
+	// wantBlocked=true: indent mismatch — hook must exit 2 with corrected strings in stderr
+	// wantBlocked=false: indents match — hook must pass through and old_string exists verbatim
+	wantBlocked bool
 }
 
 func TestGolden(t *testing.T) {
 	cases := []goldenCase{
-		// Tab-indented files: hook normalizes space old_string → tabs
+		// Tab-indented files: hook normalises space old_string → tabs via exit-2 feedback
 		{
 			name: "go/deep_nested exact match",
 			file: "deep_nested.go",
@@ -381,7 +552,7 @@ func TestGolden(t *testing.T) {
 			newString: "        if label, ok := cfg.Labels[item]; ok {\n" +
 				"                fmt.Printf(\"processing %q with label %q\\n\", item, label)\n" +
 				"        }",
-			wantNormalized: true,
+			wantBlocked: true,
 		},
 		{
 			name: "go/deep_nested validate block",
@@ -399,7 +570,7 @@ func TestGolden(t *testing.T) {
 				"                        errs = append(errs, fmt.Sprintf(\"invalid label %q=%q\", k, v))\n" +
 				"                }\n" +
 				"        }",
-			wantNormalized: true,
+			wantBlocked: true,
 		},
 		{
 			name: "templ/navbar fuzzy quote drift",
@@ -419,7 +590,7 @@ func TestGolden(t *testing.T) {
 				"                >\n" +
 				"                        { item }\n" +
 				"                </a>",
-			wantNormalized: true,
+			wantBlocked: true,
 		},
 		{
 			name: "templ/modal close button",
@@ -430,9 +601,9 @@ func TestGolden(t *testing.T) {
 			newString: "                        <button class=\"modal-close\" @click=\"closeModal\" aria-label=\"Close\" type=\"button\">\n" +
 				"                                <span aria-hidden=\"true\">&times;</span>\n" +
 				"                        </button>",
-			wantNormalized: true,
+			wantBlocked: true,
 		},
-		// Space-indented files: hook passes through, but old_string must exist verbatim
+		// Space-indented files: hook passes through, old_string must already exist verbatim
 		{
 			name: "typescript/fetchUser error branch",
 			file: "service.ts",
@@ -452,7 +623,7 @@ func TestGolden(t *testing.T) {
 				"                status: response.status,\n" +
 				"            };\n" +
 				"        }",
-			wantNormalized: false,
+			wantBlocked: false,
 		},
 		{
 			name: "python/pipeline run loop",
@@ -475,7 +646,7 @@ func TestGolden(t *testing.T) {
 				"                logger.warning(\"stage %r: error: %s\", self.name, exc)\n" +
 				"                if self.config.get(\"fail_fast\", False):\n" +
 				"                    raise PipelineError(f\"stage {self.name!r} failed\") from exc",
-			wantNormalized: false,
+			wantBlocked: false,
 		},
 		{
 			name: "html/hero section",
@@ -489,7 +660,7 @@ func TestGolden(t *testing.T) {
 				"          <p class=\"hero__subtitle\">\n" +
 				"            The all-in-one platform for teams who ship.\n" +
 				"          </p>",
-			wantNormalized: false,
+			wantBlocked: false,
 		},
 		{
 			name: "yaml/deploy job",
@@ -509,21 +680,18 @@ func TestGolden(t *testing.T) {
 				"          echo \"Deploying to staging...\"\n" +
 				"          ./scripts/deploy.sh staging dist/app-linux-amd64\n" +
 				"          ./scripts/smoke-test.sh https://staging.example.com",
-			wantNormalized: false,
+			wantBlocked: false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join("testdata", tc.file)
-			out := runHook(t, hookInput{
-				ToolName: "Edit",
-				ToolInput: editInput{
+			res := runHook(t, makeInput(t, "Edit", editInput{
 					FilePath:  path,
 					OldString: tc.oldString,
 					NewString: tc.newString,
-				},
-			})
+				}))
 
 			fileBytes, err := os.ReadFile(path)
 			if err != nil {
@@ -531,19 +699,20 @@ func TestGolden(t *testing.T) {
 			}
 			fileStr := string(fileBytes)
 
-			if tc.wantNormalized {
-				if out.HookSpecificOutput.UpdatedInput == nil {
-					t.Fatal("expected updatedInput (normalization or fuzzy), got nil")
+			if tc.wantBlocked {
+				if res.exitCode != 2 {
+					t.Fatalf("expected exit 2 (block with feedback), got exit %d\nstderr:\n%s", res.exitCode, res.stderr)
 				}
-				got := out.HookSpecificOutput.UpdatedInput.OldString
-				if !strings.Contains(fileStr, got) {
-					t.Fatalf("normalized old_string not found in file\ngot:\n%s", got)
+				correctedOld := extractFeedbackOldString(t, res.stderr)
+				if !strings.Contains(fileStr, correctedOld) {
+					t.Fatalf("corrected old_string from feedback not found in file\ngot:\n%s", correctedOld)
 				}
 			} else {
-				// Space-indented file: hook passes through, old_string must already be in file
+				// Space-indented file: hook must pass through, old_string must already exist verbatim
 				if !strings.Contains(fileStr, tc.oldString) {
 					t.Fatalf("old_string not found in testdata file — fix the test case\ngot:\n%s", tc.oldString)
 				}
+				assertPassThrough(t, res)
 			}
 		})
 	}

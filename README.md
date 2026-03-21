@@ -1,5 +1,9 @@
 # claude-tab-fix
 
+<p align="center">
+  <img src="logo.png" alt="claude-tab-fix logo" width="256"/>
+</p>
+
 A Claude Code `PreToolUse` hook that fixes indentation mismatches in `Edit` tool calls before they reach the file system.
 
 ## Problem
@@ -76,13 +80,15 @@ If the binary is not on your `PATH`, use the full path: `$(go env GOPATH)/bin/cl
 
 Before every `Edit` tool call, the hook:
 
-1. Reads the target file
-2. Detects the dominant indent style (tabs or spaces, and width if spaces)
-3. Detects the indent style used in `old_string`
-4. If they differ, re-indents both `old_string` and `new_string` to match the file
-5. Returns the corrected strings to Claude Code via `updatedInput`
+1. Reads the target file and detects its dominant indent style (tabs or N-spaces)
+2. Detects the indent style used in `old_string`
+3. If they differ, re-indents both `old_string` and `new_string` to match the file
+4. If the re-indented `old_string` isn't found verbatim, falls back to fuzzy line-similarity matching to handle minor content drift
+5. Exits with code 2 and prints the corrected strings to stderr — Claude Code surfaces this as feedback, causing Claude to retry the Edit with the exact corrected strings
 
-If the indentation already matches, the hook passes through unchanged and the original edit proceeds normally.
+If the indentation already matches, the hook passes through unchanged.
+
+See [FLOW.md](FLOW.md) for the full decision diagram.
 
 ## Edge cases handled
 
@@ -93,6 +99,10 @@ If the indentation already matches, the hook passes through unchanged and the or
 | `old_string` has no indented lines | Pass through |
 | Mixed indentation in file | Majority-wins detection |
 | `replace_all: true` | Same normalization applies |
+| `Bash` with `sed`/`awk`/`perl` on a tab-indented file | Allow + advisory warning injected into Claude's context |
+| `Write` overwrites a tab-indented file with space-indented content | Allow + advisory warning noting the mixed indentation risk |
+
+The hook fires on `Edit`, `Bash`, and `Write`. Only `Edit` calls can be automatically corrected — `Bash` and `Write` bypass the normalization path, so the hook injects a strong suggestion to use `Edit` instead. A `CLAUDE.md` file is included in the release archive; placing it in your project root reinforces this at session start.
 
 ## Development
 

@@ -19,6 +19,10 @@ archives:
         format: zip
     files:
       - README.md
+      - CLAUDE.md
+      - FLOW.md
+      - LICENCE
+      - logo.png
 
 checksum:
   name_template: "checksums.txt"
