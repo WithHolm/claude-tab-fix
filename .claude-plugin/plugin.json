@@ -5,6 +5,5 @@
   "author": {
     "name": "WithHolm"
   },
-  "repository": "https://github.com/WithHolm/claude-tab-fix",
-  "hooks": "./hooks/hooks.json"
+  "repository": "https://github.com/WithHolm/claude-tab-fix"
 }
