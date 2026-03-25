@@ -408,6 +408,21 @@ func TestIntegration_LargeFileDeepNesting(t *testing.T) {
 	}
 }
 
+func TestIntegration_TabWrongDepth(t *testing.T) {
+	// File uses tabs; old_string also uses tabs but at the wrong depth (too shallow).
+	// The hook should fuzzy-match and return the correct lines.
+	fileContent := "package main\n\nfunc foo() {\n\tfor _, x := range items {\n\t\tif x != nil {\n\t\t\tprocess(x)\n\t\t}\n\t}\n}\n"
+	path := writeTemp(t, fileContent)
+
+	res := runHook(t, makeInput(t, "Edit", editInput{
+		FilePath:  path,
+		OldString: "\tif x != nil {\n\t\tprocess(x)\n\t}",  // one tab too shallow
+		NewString: "\tif x != nil && x.Valid() {\n\t\tprocess(x)\n\t}",
+	}))
+
+	assertBlocked(t, res, "\t\tif x != nil {\n\t\t\tprocess(x)\n\t\t}")
+}
+
 func TestIntegration_AlreadyMatchingIndent(t *testing.T) {
 	path := writeTemp(t, "package main\n\nfunc foo() {\n\tif true {\n\t\tx := 1\n\t}\n}\n")
 	res := runHook(t, makeInput(t, "Edit", editInput{

@@ -299,17 +299,27 @@ func handleEdit(raw json.RawMessage) {
 	fileIndent := detectIndent(fileStr)
 	oldIndent := detectIndent(ei.OldString)
 
-	// If either detection failed or they match, pass through
-	if fileIndent.char == 0 || oldIndent.char == 0 || fileIndent.char == oldIndent.char {
+	// If file indent detection failed, pass through
+	if fileIndent.char == 0 {
 		passThrough()
 		return
 	}
 
+	// If old_string already matches the file exactly, pass through
+	if strings.Contains(fileStr, ei.OldString) {
+		passThrough()
+		return
+	}
+
+	// Attempt reindent when char differs; when same char, reindent is a no-op
+	// but we still fall through to fuzzy matching below.
 	newOld := reindent(ei.OldString, oldIndent, fileIndent)
 	newNew := reindent(ei.NewString, oldIndent, fileIndent)
 
-	oldLines := len(strings.Split(ei.OldString, "\n"))
-	logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
+	if oldIndent.char != 0 && fileIndent.char != oldIndent.char {
+		oldLines := len(strings.Split(ei.OldString, "\n"))
+		logf("normalizing %s → %s across %d lines in old_string", indentName(oldIndent), indentName(fileIndent), oldLines)
+	}
 
 	if !strings.Contains(fileStr, newOld) {
 		// Exact match failed — try fuzzy block match
@@ -319,10 +329,12 @@ func handleEdit(raw json.RawMessage) {
 		if start >= 0 {
 			matched := strings.Join(fileLines[start:start+len(queryLines)], "\n")
 			newOld = matched
+			// Re-derive newNew with same relative indent shift applied to new_string
+			newNew = reindent(ei.NewString, oldIndent, fileIndent)
 			logf("fuzzy match: found block (score=%.2f, lines %d–%d)", score, start+1, start+len(queryLines))
 		} else {
-			logf("WARNING: normalized old_string not found in file and fuzzy match failed — edit will likely fail")
-			logf("normalized old_string was:\n%s", newOld)
+			logf("WARNING: old_string not found in file and fuzzy match failed — edit will likely fail")
+			logf("old_string was:\n%s", newOld)
 			passThrough()
 			return
 		}
