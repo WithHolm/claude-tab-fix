@@ -4,11 +4,13 @@
   <img src="logo.png" alt="claude-tab-fix logo" width="256"/>
 </p>
 
-A Claude Code `PreToolUse` hook that fixes indentation mismatches in `Edit` tool calls before they reach the file system.
+A Claude Code hook that fixes indentation mismatches in `Edit` tool calls and warns Claude about the tab-separator ambiguity in `Read` output.
 
 ## Problem
 
 Claude Code's `Edit` tool matches `old_string` against file content as a literal string. When the model generates `old_string` with spaces but the file uses tabs (or vice versa), the match fails silently and no edit is applied. This is a persistent issue with Go, `.templ`, and other tab-indented files.
+
+The root cause is in the `Read` tool: it formats output as `N\t<line content>`, using a tab as the line-number separator. For tab-indented files this is visually identical to the file's own indentation — the model cannot distinguish the separator tab from content tabs, so it consistently produces `old_string` with one extra leading tab per nesting level.
 
 ## Installation
 
@@ -46,13 +48,13 @@ go install github.com/WithHolm/claude-tab-fix@latest
 /plugin install claude-tab-fix@WithHolm/claude-tab-fix
 ```
 
-The plugin registers the `PreToolUse` hook for you — no manual config editing needed.
+The plugin registers both hooks for you — no manual config editing needed.
 
 ### Manually
 
-Install the binary, then add the hook to your Claude Code settings.
+Install the binary, then add the hooks to your Claude Code settings.
 
-**Per-project** — commit `.claude/settings.json` to your repo so anyone who clones it gets the hook automatically:
+**Per-project** — commit `.claude/settings.json` to your repo so anyone who clones it gets the hooks automatically:
 
 ```json
 {
@@ -60,12 +62,13 @@ Install the binary, then add the hook to your Claude Code settings.
     "PreToolUse": [
       {
         "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "claude-tab-fix"
-          }
-        ]
+        "hooks": [{ "type": "command", "command": "claude-tab-fix" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [{ "type": "command", "command": "claude-tab-fix" }]
       }
     ]
   }
@@ -78,7 +81,9 @@ If the binary is not on your `PATH`, use the full path: `$(go env GOPATH)/bin/cl
 
 ## How it works
 
-Before every `Edit` tool call, the hook:
+**PostToolUse / Read** — after every `Read` call on a tab-indented file, the hook injects a context note reminding Claude that the `N\t` line-number prefix is a separator tab, not part of the file content, so `old_string` should have one fewer leading tab than the raw output suggests.
+
+**PreToolUse / Edit** — before every `Edit` call, the hook:
 
 1. Reads the target file and detects its dominant indent style (tabs or N-spaces)
 2. Detects the indent style used in `old_string`
@@ -86,7 +91,7 @@ Before every `Edit` tool call, the hook:
 4. If the re-indented `old_string` isn't found verbatim, falls back to fuzzy line-similarity matching to handle minor content drift
 5. Exits with code 2 and prints the corrected strings to stderr — Claude Code surfaces this as feedback, causing Claude to retry the Edit with the exact corrected strings
 
-If the indentation already matches, the hook passes through unchanged.
+If the indentation already matches, the Edit hook passes through unchanged.
 
 See [FLOW.md](FLOW.md) for the full decision diagram.
 
@@ -102,7 +107,7 @@ See [FLOW.md](FLOW.md) for the full decision diagram.
 | `Bash` with `sed`/`awk`/`perl` on a tab-indented file | Allow + advisory warning injected into Claude's context |
 | `Write` overwrites a tab-indented file with space-indented content | Allow + advisory warning noting the mixed indentation risk |
 
-The hook fires on `Edit`, `Bash`, and `Write`. Only `Edit` calls can be automatically corrected — `Bash` and `Write` bypass the normalization path, so the hook injects a strong suggestion to use `Edit` instead. A `CLAUDE.md` file is included in the release archive; placing it in your project root reinforces this at session start.
+The hook fires on `Read` (PostToolUse), `Edit`, `Bash`, and `Write` (all PreToolUse). Only `Edit` calls can be automatically corrected — `Bash` and `Write` bypass the normalization path, so the hook injects a strong suggestion to use `Edit` instead. A `CLAUDE.md` file is included in the release archive; placing it in your project root reinforces this at session start.
 
 ## Development
 

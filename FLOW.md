@@ -1,5 +1,31 @@
 # Hook flow
 
+## Read (PostToolUse)
+
+```
+Claude issues a Read tool call
+            │
+            ▼
+    Read tool executes (file content already in Claude's context)
+            │
+            ▼
+    PostToolUse hook fires
+    claude-tab-fix reads JSON from stdin
+            │
+            ├─ file does not exist / unreadable / binary
+            │           └──► silent exit (no output)
+            │
+            ├─ file uses space indentation
+            │           └──► silent exit (no output)
+            │
+            └─ file uses tab indentation
+                        └──► postPassThroughWithContext
+                             additionalContext: "the N\t prefix is the separator,
+                             not file content — use one fewer leading tab in old_string"
+```
+
+## Edit (PreToolUse)
+
 ```
 Claude issues an Edit tool call
             │

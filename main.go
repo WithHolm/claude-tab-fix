@@ -41,7 +41,7 @@ type hookOutput struct {
 
 type hookSpecific struct {
 	HookEventName      string `json:"hookEventName"`
-	PermissionDecision string `json:"permissionDecision"`
+	PermissionDecision string `json:"permissionDecision,omitempty"`
 	AdditionalContext  string `json:"additionalContext,omitempty"`
 }
 
@@ -248,6 +248,16 @@ func passThroughWithContext(ctx string) {
 	json.NewEncoder(os.Stdout).Encode(out)
 }
 
+func postPassThroughWithContext(ctx string) {
+	out := hookOutput{
+		HookSpecificOutput: hookSpecific{
+			HookEventName:     "PostToolUse",
+			AdditionalContext: ctx,
+		},
+	}
+	json.NewEncoder(os.Stdout).Encode(out)
+}
+
 // exitFn is a variable so tests can override os.Exit.
 var exitFn = os.Exit
 
@@ -279,6 +289,39 @@ func extractFileFromBashCommand(cmd string) string {
 		}
 	}
 	return ""
+}
+
+type readInput struct {
+	FilePath string `json:"file_path"`
+}
+
+// handleRead fires after the Read tool completes. If the file uses tab
+// indentation, it injects a context note reminding Claude that the Read
+// tool's line-number separator is also a tab, so old_string for Edit calls
+// should have one fewer leading tab than the raw output suggests.
+func handleRead(raw json.RawMessage) {
+	var ri readInput
+	if err := json.Unmarshal(raw, &ri); err != nil {
+		return
+	}
+
+	content, err := os.ReadFile(ri.FilePath)
+	if err != nil || bytes.IndexByte(content, 0) >= 0 {
+		return
+	}
+
+	fileIndent := detectIndent(string(content))
+	if fileIndent.char != '\t' {
+		return
+	}
+
+	postPassThroughWithContext(
+		"claude-tab-fix: " + ri.FilePath + " uses tab indentation. " +
+			"IMPORTANT: the Read tool prefixes each line with \"N\\t\" (line number + tab). " +
+			"That leading tab is the separator, NOT part of the file content. " +
+			"When constructing old_string or new_string for an Edit call, " +
+			"use one fewer leading tab than you see in the Read output.",
+	)
 }
 
 // handleEdit is the main path: fix indent mismatches in Edit tool calls.
@@ -420,6 +463,8 @@ func main() {
 		handleEdit(input.ToolInput)
 	case "Bash", "Write":
 		handleBashOrWrite(input.ToolName, input.ToolInput)
+	case "Read":
+		handleRead(input.ToolInput)
 	default:
 		passThrough()
 	}
