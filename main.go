@@ -228,21 +228,14 @@ func indentName(s indentStyle) string {
 }
 
 func passThrough() {
-	out := hookOutput{
-		HookSpecificOutput: hookSpecific{
-			HookEventName:      "PreToolUse",
-			PermissionDecision: "allow",
-		},
-	}
-	json.NewEncoder(os.Stdout).Encode(out)
+	// Exit 0 with no stdout — hook makes no decision, normal permission flow applies.
 }
 
 func passThroughWithContext(ctx string) {
 	out := hookOutput{
 		HookSpecificOutput: hookSpecific{
-			HookEventName:      "PreToolUse",
-			PermissionDecision: "allow",
-			AdditionalContext:  ctx,
+			HookEventName:     "PreToolUse",
+			AdditionalContext: ctx,
 		},
 	}
 	json.NewEncoder(os.Stdout).Encode(out)

@@ -314,14 +314,11 @@ func assertBlocked(t *testing.T, res hookResult, wantOldString string) {
 	}
 }
 
-// assertPassThrough verifies the hook allowed the edit through (exit 0, allow decision).
+// assertPassThrough verifies the hook passed through (exit 0, no opinion).
 func assertPassThrough(t *testing.T, res hookResult) {
 	t.Helper()
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0 (pass-through), got exit %d\nstderr: %s", res.exitCode, res.stderr)
-	}
-	if res.out.HookSpecificOutput.PermissionDecision != "allow" {
-		t.Fatalf("expected allow decision, got %q", res.out.HookSpecificOutput.PermissionDecision)
 	}
 }
 
