@@ -1,7 +1,7 @@
 {
   "name": "claude-tab-fix",
-  "version": "1.0.4",
-  "description": "Hook that normalizes indentation in Edit tool calls and warns Claude about the tab separator ambiguity in Read output — fixes silent failures on tab-indented files",
+  "version": "1.0.5",
+  "description": "Hook that warns Claude about tab indentation and the Read tool's line-number separator — fixes silent Edit failures on tab-indented files",
   "author": {
     "name": "WithHolm"
   },

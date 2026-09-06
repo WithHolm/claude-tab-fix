@@ -7,8 +7,8 @@
     {
       "name": "claude-tab-fix",
       "source": "./",
-      "description": "PreToolUse hook that normalizes indentation in Edit tool calls — fixes silent failures when Claude uses spaces in tab-indented files",
-      "version": "1.0.2"
+      "description": "Hook that warns Claude about tab indentation and the Read tool's line-number separator — fixes silent Edit failures on tab-indented files",
+      "version": "1.0.5"
     }
   ]
 }
