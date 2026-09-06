@@ -20,81 +20,66 @@ Claude issues a Read tool call
             │
             └─ file uses tab indentation
                         └──► postPassThroughWithContext
-                             additionalContext: "the N\t prefix is the separator,
-                             not file content — use one fewer leading tab in old_string"
+                             additionalContext: "file uses tab indentation.
+                             The N\t prefix is the separator, not file content —
+                             use one fewer leading tab in old_string"
 ```
 
-## Edit (PreToolUse)
+## Bash / Write (PreToolUse)
 
 ```
-Claude issues an Edit tool call
+Claude issues a Bash or Write tool call
             │
             ▼
     PreToolUse hook fires
     claude-tab-fix reads JSON from stdin
             │
             ├─ bad JSON / unreadable stdin
-            │           └──► passThrough → exit 0 (allow edit unchanged)
+            │           └──► passThrough → exit 0
             │
             ├─ file does not exist
             │           └──► passThrough → exit 0
             │
-            ├─ binary file (contains null bytes)
+            ├─ binary file
             │           └──► passThrough → exit 0
             │
-            ▼
-    Detect indent style of file
-    Detect indent style of old_string
-            │
-            ├─ either is undetectable (no indented lines)
+            ├─ Bash: command is not a file-editing pattern
             │           └──► passThrough → exit 0
             │
-            ├─ both use the same style (tabs==tabs, spaces==spaces)
+            ├─ file uses space indentation
             │           └──► passThrough → exit 0
             │
-            ▼
-    reindent(old_string, from=old_style, to=file_style)
-    reindent(new_string, from=old_style, to=file_style)
-            │
-            ▼
-    Does reindented old_string exist verbatim in file?
-            │
-            ├─ YES
-            │   └──► blockWithFeedback → exit 2
-            │         stderr: "Retry the Edit with these exact strings:
-            │                  old_string: <reindented>
-            │                  new_string: <reindented>"
-            │         Claude sees the message, retries with corrected strings
-            │
-            └─ NO  (content has drifted since Claude read the file)
+            └─ file uses tab indentation
                         │
-                        ▼
-                fuzzyFindBlock()
-                slides a window over the file, scores each candidate
-                by line similarity (strips indent, uses LCS ratio)
+                        ├─ Write: new content uses different indent style
+                        │   └──► passThroughWithContext
+                        │        additionalContext: "WARNING: tab-indented file.
+                        │        New content uses N-space — mixed indentation.
+                        │        Strongly prefer the Edit tool."
                         │
-                        ├─ match found (≥85% of lines score ≥0.85)
-                        │   └──► use exact file bytes as old_string
-                        │        blockWithFeedback → exit 2
-                        │        (same retry flow as above)
+                        ├─ Write: new content also uses tabs
+                        │   └──► passThroughWithContext
+                        │        additionalContext: "WARNING: tab-indented file.
+                        │        Editing via Write bypasses indent normalization.
+                        │        Strongly prefer the Edit tool."
                         │
-                        └─ no match
-                                    └──► passThrough → exit 0
-                                         (can't help — let Claude try anyway)
+                        └─ Bash: file-editing command detected
+                            └──► passThroughWithContext
+                                 additionalContext: "WARNING: tab-indented file.
+                                 Editing via Bash bypasses indent normalization.
+                                 Strongly prefer the Edit tool."
 ```
 
-## Exit codes
+## Why no Edit PreToolUse hook
 
-| Code | Meaning |
-|------|---------|
-| `0` | Pass-through — edit proceeds unchanged |
-| `2` | Blocked with feedback — Claude Code surfaces stderr to Claude, which retries the Edit with the corrected strings |
+Claude Code validates `old_string` against the file **before** calling PreToolUse
+hooks. If `old_string` uses spaces and the file uses tabs, Claude Code rejects
+the Edit with "String to replace not found" — the hook never runs.
 
-## Why exit 2 instead of `updatedInput`
+The same validation applies to `updatedInput` and `blockWithFeedback` responses:
+Claude Code checks the original input first, so the hook cannot intercept
+mismatched edits.
 
-Claude Code may pre-validate `old_string` before applying hook output. Sending
-corrected strings via `updatedInput` can therefore still fail if Claude's
-internal check runs first. Exiting with code 2 causes Claude Code to surface
-the stderr message directly to the model as an error, which prompts Claude to
-issue a brand-new Edit call with the exact corrected strings — a more reliable
-retry path.
+Instead, the Read hook tells Claude the file uses tabs. Claude constructs
+`old_string` with correct tab indentation, the bytes match, and the Edit
+proceeds without hook intervention.

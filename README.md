@@ -4,13 +4,13 @@
   <img src="logo.png" alt="claude-tab-fix logo" width="256"/>
 </p>
 
-A Claude Code hook that fixes indentation mismatches in `Edit` tool calls and warns Claude about the tab-separator ambiguity in `Read` output.
+A Claude Code hook that warns Claude about tab-indented files — preventing silent Edit failures and mixed-indentation corruption.
 
 ## Problem
 
-Claude Code's `Edit` tool matches `old_string` against file content as a literal string. When the model generates `old_string` with spaces but the file uses tabs (or vice versa), the match fails silently and no edit is applied. This is a persistent issue with Go, `.templ`, and other tab-indented files.
+Claude Code's `Read` tool formats output as `N\t<line content>`, using a tab as the line-number separator. For tab-indented files this is visually identical to the file's own indentation — Claude cannot distinguish the separator tab from content tabs, so it often produces `old_string` with wrong indentation.
 
-The root cause is in the `Read` tool: it formats output as `N\t<line content>`, using a tab as the line-number separator. For tab-indented files this is visually identical to the file's own indentation — the model cannot distinguish the separator tab from content tabs, so it consistently produces `old_string` with one extra leading tab per nesting level.
+Claude Code also validates `old_string` against the file **before** calling PreToolUse hooks. This means hooks cannot fix indentation mismatches automatically — they can only warn Claude so it corrects itself.
 
 ## Installation
 
@@ -60,7 +60,11 @@ Install the binary, then add the hooks to your Claude Code settings.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit",
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "claude-tab-fix" }]
+      },
+      {
+        "matcher": "Write",
         "hooks": [{ "type": "command", "command": "claude-tab-fix" }]
       }
     ],
@@ -103,33 +107,24 @@ when combined with the added context this tool gives ("hey claude, please rememb
 
 ## How it works
 
-**PostToolUse / Read** — after every `Read` call on a tab-indented file, the hook injects a context note reminding Claude that the `N\t` line-number prefix is a separator tab, not part of the file content, so `old_string` should have one fewer leading tab than the raw output suggests.
+**PostToolUse / Read** — after every `Read` call on a tab-indented file, the hook injects a context note reminding Claude that the `N\t` line-number prefix is a separator tab, not part of the file content. Claude uses this information to construct correct `old_string` with proper tab indentation.
 
-**PreToolUse / Edit** — before every `Edit` call, the hook:
+**PreToolUse / Bash** — before `sed`, `awk`, `perl`, or `python` commands that target a tab-indented file, the hook warns Claude to use the `Edit` tool instead, since shell commands bypass indentation awareness.
 
-1. Reads the target file and detects its dominant indent style (tabs or N-spaces)
-2. Detects the indent style used in `old_string`
-3. If they differ, re-indents both `old_string` and `new_string` to match the file
-4. If the re-indented `old_string` isn't found verbatim, falls back to fuzzy line-similarity matching to handle minor content drift
-5. Exits with code 2 and prints the corrected strings to stderr — Claude Code surfaces this as feedback, causing Claude to retry the Edit with the exact corrected strings
-
-If the indentation already matches, the Edit hook passes through unchanged.
-
-See [FLOW.md](FLOW.md) for the full decision diagram.
+**PreToolUse / Write** — before overwriting a tab-indented file, the hook checks whether the new content uses a different indent style. If writing spaces to a tab file (or vice versa), it warns that the result will have mixed indentation and strongly suggests using `Edit` instead.
 
 ## Edge cases handled
 
 | Situation | Behaviour |
 |---|---|
-| File doesn't exist yet | Pass through (new file creation) |
+| File doesn't exist | Pass through |
 | Binary file | Pass through |
-| `old_string` has no indented lines | Pass through |
-| Mixed indentation in file | Majority-wins detection |
-| `replace_all: true` | Same normalization applies |
-| `Bash` with `sed`/`awk`/`perl` on a tab-indented file | Allow + advisory warning injected into Claude's context |
-| `Write` overwrites a tab-indented file with space-indented content | Allow + advisory warning noting the mixed indentation risk |
+| File uses spaces | Pass through (no warning needed) |
+| `Bash` on non-file-edit command (`go test`, etc.) | Pass through |
+| `Write` with matching indent style | Pass through |
+| `Read` on non-tab file | Pass through |
 
-The hook fires on `Read` (PostToolUse), `Edit`, `Bash`, and `Write` (all PreToolUse). Only `Edit` calls can be automatically corrected — `Bash` and `Write` bypass the normalization path, so the hook injects a strong suggestion to use `Edit` instead. A `CLAUDE.md` file is included in the release archive; placing it in your project root reinforces this at session start.
+The hook fires on `Read` (PostToolUse), `Bash`, and `Write` (PreToolUse). A `CLAUDE.md` file is included in the release archive; placing it in your project root reinforces tab-awareness at session start.
 
 ## Development
 
