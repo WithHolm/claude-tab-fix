@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -20,6 +21,7 @@ type hookInput struct {
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
 }
+
 // bashInput covers the Bash tool (command) and Write tool (file_path + content).
 type bashInput struct {
 	Command  string `json:"command"`
@@ -96,12 +98,30 @@ func detectIndent(s string) indentStyle {
 	return indentStyle{char: ' ', width: width}
 }
 
-
 func indentName(s indentStyle) string {
 	if s.char == '\t' {
 		return "tabs"
 	}
 	return fmt.Sprintf("%d-space", s.width)
+}
+
+const maxInspectBytes = 1 << 20
+
+func readForInspection(path string) ([]byte, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxInspectBytes))
+	if err != nil || bytes.IndexByte(data, 0) >= 0 {
+		return nil, false
+	}
+	return data, true
 }
 
 func passThrough() {
@@ -165,8 +185,8 @@ func handleRead(raw json.RawMessage) {
 		return
 	}
 
-	content, err := os.ReadFile(ri.FilePath)
-	if err != nil || bytes.IndexByte(content, 0) >= 0 {
+	content, ok := readForInspection(ri.FilePath)
+	if !ok {
 		return
 	}
 
@@ -205,8 +225,8 @@ func handleBashOrWrite(toolName string, raw json.RawMessage) {
 		}
 	}
 
-	existing, err := os.ReadFile(filePath)
-	if err != nil || bytes.IndexByte(existing, 0) >= 0 {
+	existing, ok := readForInspection(filePath)
+	if !ok {
 		passThrough()
 		return
 	}
@@ -250,7 +270,7 @@ func main() {
 	}
 
 	switch input.ToolName {
-case "Bash", "Write":
+	case "Bash", "Write":
 		handleBashOrWrite(input.ToolName, input.ToolInput)
 	case "Read":
 		handleRead(input.ToolInput)
