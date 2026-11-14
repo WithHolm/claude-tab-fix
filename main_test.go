@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,38 @@ func TestDetectIndent_Empty(t *testing.T) {
 	got := detectIndent("")
 	if got.char != 0 {
 		t.Fatalf("expected zero value for empty string")
+	}
+}
+
+// --- readForInspection ---
+
+func TestReadForInspection_TruncatesLargeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.txt")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), maxInspectBytes*2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := readForInspection(path)
+	if !ok {
+		t.Fatal("expected large text file to be readable")
+	}
+	if len(got) != maxInspectBytes {
+		t.Fatalf("expected %d bytes, got %d", maxInspectBytes, len(got))
+	}
+}
+
+func TestReadForInspection_RejectsBinary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "binary.bin")
+	if err := os.WriteFile(path, []byte("foo\x00bar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readForInspection(path); ok {
+		t.Fatal("expected binary file to be rejected")
+	}
+}
+
+func TestReadForInspection_RejectsMissingFile(t *testing.T) {
+	if _, ok := readForInspection(filepath.Join(t.TempDir(), "missing.txt")); ok {
+		t.Fatal("expected missing file to be rejected")
 	}
 }
 
@@ -211,4 +244,3 @@ func TestWrite_WarnOnTabFileWithTabContent(t *testing.T) {
 		t.Fatalf("unexpected mixed indentation warning when content also uses tabs: %q", ctx)
 	}
 }
-
