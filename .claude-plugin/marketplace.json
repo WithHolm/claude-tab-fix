@@ -8,7 +8,7 @@
       "name": "claude-tab-fix",
       "source": "./",
       "description": "Hook that warns Claude about tab indentation and the Read tool's line-number separator — fixes silent Edit failures on tab-indented files",
-      "version": "1.0.5"
+      "version": "1.0.6"
     }
   ]
 }
